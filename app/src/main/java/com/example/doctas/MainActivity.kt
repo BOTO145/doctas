@@ -62,6 +62,7 @@ import androidx.compose.foundation.Image // Needed for JPGs
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.layout.ContentScale
+import io.ktor.client.plugins.HttpTimeout
 
 
 class MainActivity : ComponentActivity() {
@@ -128,6 +129,12 @@ private val client = HttpClient(CIO) {
             isLenient = true
         })
     }
+    // Add this block to configure timeouts
+    install(HttpTimeout) {
+        requestTimeoutMillis = 30_000L  // 30 seconds for the request to complete
+        connectTimeoutMillis = 30_000L  // 30 seconds to establish a connection
+        socketTimeoutMillis = 30_000L   // 30 seconds of inactivity between data packets
+    }
 }
 
 suspend fun sendHealthData(text: String): Result<FormattedData> {
@@ -160,17 +167,14 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
     // --- State Variables ---
     var finalText by rememberSaveable { mutableStateOf("") }
     var partialText by remember { mutableStateOf("") }
+
+    // The "Master Switch": If this is true, we force the recognizer to restart
     var isListeningDesired by remember { mutableStateOf(false) }
     var uiState by rememberSaveable { mutableStateOf(UiState.IDLE) }
+
     var rmsdB by remember { mutableFloatStateOf(0f) }
 
-    // NEW: Track last speech time for smarter silence handling
-    var lastSpeechTime by remember { mutableLongStateOf(0L) }
-    var hasSpokenRecently by remember { mutableStateOf(false) }
-
-    // NEW: Debounce final results to prevent duplicates
-    var lastProcessedResult by remember { mutableStateOf("") }
-
+    // --- State for Dialog and URL ---
     var showSheetDialog by remember { mutableStateOf(false) }
     val uriHandler = LocalUriHandler.current
     val sheetUrl = "https://docs.google.com/spreadsheets/d/1_NlDGWglSz9Z9BuTUktX7mwUfUMnhlhmuA1gnTVcAxA"
@@ -178,21 +182,16 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    // --- Improved Speech Recognizer Intent Setup ---
+    // --- 1. DEFAULT SETTINGS for Intent ---
     val speechRecognizerIntent = remember {
         Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            // Use FREE_FORM for better dictation (vs WEB_SEARCH for commands)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toString())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3) // Get more alternatives for better accuracy
-
-            // IMPROVED: More Gboard-like timing
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
-
-            // NEW: Enable more aggressive recognition
-            putExtra("android.speech.extra.DICTATION_MODE", true) // Continuous dictation mode
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            // We use the "DICTATION_MODE" flag as a hint to the OS to listen longer if possible
+            putExtra("android.speech.extra.DICTATION_MODE", true)
         }
     }
 
@@ -200,152 +199,65 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
     val startListening = {
         isListeningDesired = true
         uiState = UiState.LISTENING
-        lastSpeechTime = System.currentTimeMillis()
-        hasSpokenRecently = false
         speechRecognizer.startListening(speechRecognizerIntent)
     }
 
     val stopListening = {
         isListeningDesired = false
         uiState = UiState.IDLE
-        hasSpokenRecently = false
         speechRecognizer.stopListening()
     }
 
+    // --- 2. CONTINUOUS SPEECH LOGIC ---
     val listener = remember {
         object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
                 if (isListeningDesired) uiState = UiState.LISTENING
             }
-
-            override fun onBeginningOfSpeech() {
-                lastSpeechTime = System.currentTimeMillis()
-                hasSpokenRecently = true
-            }
-
+            override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdBVal: Float) {
-                if (isListeningDesired) {
-                    rmsdB = rmsdBVal
-                    // Update speech activity based on volume
-                    if (rmsdBVal > 0) {
-                        lastSpeechTime = System.currentTimeMillis()
-                        hasSpokenRecently = true
-                    }
-                }
+                if (isListeningDesired) rmsdB = rmsdBVal
             }
-
             override fun onBufferReceived(buffer: ByteArray?) {}
-
             override fun onEndOfSpeech() {
-                // Don't change UI state - let onResults handle it
+                // The engine paused (silence). Do NOT stop the UI here.
             }
 
             override fun onError(error: Int) {
-                if (!isListeningDesired) return
+                if (!isListeningDesired) return // We stopped it manually
 
-                val currentTime = System.currentTimeMillis()
-                val timeSinceLastSpeech = currentTime - lastSpeechTime
-
-                // IMPROVED: Smart restart logic based on context
-                when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH -> {
-                        // If user spoke recently, this might be mid-sentence - restart immediately
-                        if (hasSpokenRecently && timeSinceLastSpeech < 3000) {
-                            speechRecognizer.startListening(speechRecognizerIntent)
-                        } else {
-                            // Long silence, restart normally
-                            hasSpokenRecently = false
-                            speechRecognizer.startListening(speechRecognizerIntent)
-                        }
-                    }
-
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                        // Restart immediately - this is just silence
-                        speechRecognizer.startListening(speechRecognizerIntent)
-                    }
-
-                    SpeechRecognizer.ERROR_NETWORK,
-                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
-                        // Network issue - try to recreate recognizer
-                        try {
-                            speechRecognizer.destroy()
-                            val newRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
-                            newRecognizer.setRecognitionListener(this)
-                            newRecognizer.startListening(speechRecognizerIntent)
-                        } catch (e: Exception) {
-                            uiState = UiState.ERROR
-                            isListeningDesired = false
-                        }
-                    }
-
-                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-                        // Wait a bit then restart
-                        coroutineScope.launch {
-                            kotlinx.coroutines.delay(100)
-                            if (isListeningDesired) {
-                                speechRecognizer.startListening(speechRecognizerIntent)
-                            }
-                        }
-                    }
-
-                    SpeechRecognizer.ERROR_AUDIO,
-                    SpeechRecognizer.ERROR_CLIENT,
-                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
-                        // Fatal errors
-                        uiState = UiState.ERROR
-                        isListeningDesired = false
-                    }
-
-                    else -> {
-                        // Unknown error, try to restart once
-                        speechRecognizer.startListening(speechRecognizerIntent)
-                    }
-                }
-            }
-
-            override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val result = matches?.getOrNull(0) ?: ""
-
-                // NEW: Debounce duplicate results
-                if (result.isNotBlank() && result != lastProcessedResult) {
-                    lastProcessedResult = result
-
-                    // Smart text appending with punctuation awareness
-                    finalText = when {
-                        finalText.isBlank() -> result
-                        // If last char is punctuation, capitalize next word
-                        finalText.last() in listOf('.', '!', '?') -> {
-                            "$finalText ${result.replaceFirstChar { it.uppercase() }}"
-                        }
-                        // Normal append with space
-                        else -> "$finalText $result"
-                    }
-                }
-
-                partialText = ""
-                lastSpeechTime = System.currentTimeMillis()
-
-                // IMPROVED: Faster restart for continuous feel
-                if (isListeningDesired) {
-                    // Immediate restart without delay
+                // These errors mean "Silence" or "Timeout" -> Restart immediately
+                if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                    speechRecognizer.startListening(speechRecognizerIntent)
+                } else {
+                    // For other errors, try to restart once, but update UI if it fails
+                    // (Optional: You could count retries here to avoid infinite loops)
                     speechRecognizer.startListening(speechRecognizerIntent)
                 }
             }
 
-            override fun onPartialResults(partialResults: Bundle?) {
-                val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val result = matches?.getOrNull(0) ?: ""
+            override fun onResults(results: Bundle?) {
+                val result = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.getOrNull(0) ?: ""
 
                 if (result.isNotBlank()) {
-                    // NEW: Only update if it's actually different
-                    if (result != partialText) {
-                        partialText = result
-                        lastSpeechTime = System.currentTimeMillis()
-                    }
+                    finalText = if (finalText.isBlank()) result else "$finalText $result"
+                }
+                partialText = ""
+
+                // RESTART LOGIC: If we still want to listen, start again instantly
+                if (isListeningDesired) {
+                    speechRecognizer.startListening(speechRecognizerIntent)
+                } else {
+                    uiState = UiState.IDLE
                 }
             }
 
+            override fun onPartialResults(partialResults: Bundle?) {
+                val result = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.getOrNull(0) ?: ""
+                if (result.isNotBlank()) {
+                    partialText = result
+                }
+            }
             override fun onEvent(eventType: Int, params: Bundle?) {}
         }
     }
@@ -358,9 +270,7 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
 
     DisposableEffect(speechRecognizer) {
         speechRecognizer.setRecognitionListener(listener)
-        onDispose {
-            speechRecognizer.setRecognitionListener(null)
-        }
+        onDispose { speechRecognizer.setRecognitionListener(null) }
     }
 
     // --- Animation & Color Logic ---
@@ -390,6 +300,7 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                 .padding(paddingValues)
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
+
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -397,13 +308,9 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.SpaceBetween
                 ) {
-                    // 1. Text Editing Area with live preview
+                    //1. Text Editing Area (Scrollable & Live Preview)
                     val displayText = if (partialText.isNotBlank()) {
-                        if (finalText.isBlank()) {
-                            partialText
-                        } else {
-                            "$finalText $partialText"
-                        }
+                        "$finalText $partialText"
                     } else {
                         finalText
                     }
@@ -412,20 +319,34 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                         value = displayText,
                         onValueChange = { newText ->
                             finalText = newText
-                            partialText = ""
                         },
                         label = { Text("Recognized Text") },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .weight(1f),
+                            .weight(1f), // Takes available space
                         textStyle = MaterialTheme.typography.headlineSmall,
                         singleLine = false,
                         maxLines = Int.MAX_VALUE
                     )
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // --- NEW: Test Example Button ---
+                    // Placed between Text Area and Mic/Wave
+                    TextButton(
+                        onClick = {
+                            finalText = "Ramesh Kumar, age 50, male, CR-98765, shortness of breath, Glasgow Coma Scale 13, red initial triage, yellow final triage, BP 160/95, pulse rate 95, respiratory rate 22, SpO2 89%, chest X-ray and CT scan advised, radiology completed, report reported, admitted to respiratory medicine"
+                            partialText = "" // Clear any partial text
+                        }
+                    ) {
+                        Text("Insert Test Example")
+                    }
+                    // --------------------------------
+
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     // 2. Sine Wave Visualization
+                    // Only show when "Desired" so it doesn't flicker during restart
                     if (isListeningDesired) {
                         SineWave(rmsdB = rmsdB)
                     } else {
@@ -449,11 +370,7 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                                 if (isListeningDesired) {
                                     stopListening()
                                 } else {
-                                    if (ContextCompat.checkSelfPermission(
-                                            context,
-                                            Manifest.permission.RECORD_AUDIO
-                                        ) == PackageManager.PERMISSION_GRANTED
-                                    ) {
+                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                                         startListening()
                                     } else {
                                         requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -473,7 +390,7 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
 
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    // 4. Action Buttons
+                    // 4. Action Buttons (Clear & Send)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly
@@ -483,11 +400,8 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                                 stopListening()
                                 finalText = ""
                                 partialText = ""
-                                lastProcessedResult = ""
                             },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.secondary
-                            )
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                         ) {
                             Text("Clear")
                         }
@@ -499,11 +413,7 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                                     uiState = UiState.PROCESSING
                                     coroutineScope.launch {
                                         val result = sendHealthData(finalText)
-                                        uiState = if (result.isSuccess) {
-                                            UiState.SUCCESS
-                                        } else {
-                                            UiState.ERROR
-                                        }
+                                        uiState = if (result.isSuccess) UiState.SUCCESS else UiState.ERROR
                                     }
                                 }
                             },
@@ -515,19 +425,21 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                                     color = MaterialTheme.colorScheme.onPrimary
                                 )
                             } else {
-                                Text("Send to Server")
+                                Text("Send to database")
                             }
                         }
                     }
                 }
 
-                // Top Right Icon
+
+                // Top Right Icon (Database)
                 IconButton(
                     onClick = { showSheetDialog = true },
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(16.dp)
                 ) {
+                    // Ensure you have R.drawable.ic_sheets
                     Image(
                         painter = painterResource(id = R.drawable.ic_sheets),
                         contentDescription = "Open Database",
@@ -573,16 +485,14 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
     }
 }
 
-
-
-
+// Fixed SineWave Function
 @Composable
 fun SineWave(rmsdB: Float) {
     // Smoothly animate the amplitude jumping
     val animatedRms by animateFloatAsState(
         targetValue = rmsdB,
         label = "rms",
-        animationSpec = tween(100) // fast reaction
+        animationSpec = tween(100)
     )
 
     // We use infiniteTransition for the phase to ensure it loops perfectly forever
@@ -594,7 +504,6 @@ fun SineWave(rmsdB: Float) {
             initialValue = 0f,
             targetValue = 2 * PI.toFloat(),
             animationSpec = infiniteRepeatable(
-                // Different durations create the "drifting" layered effect
                 animation = tween(durationMillis = 1000 + (index * 500), easing = LinearEasing),
                 repeatMode = RepeatMode.Restart
             ),
@@ -633,3 +542,4 @@ fun SineWave(rmsdB: Float) {
         }
     }
 }
+
