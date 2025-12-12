@@ -9,32 +9,40 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.view.HapticFeedbackConstants
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -45,6 +53,7 @@ import com.andlab.doctas.ui.theme.Yellow
 import io.ktor.client.*
 import io.ktor.client.call.*
 import io.ktor.client.engine.cio.*
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -58,12 +67,6 @@ import kotlinx.serialization.json.Json
 import java.util.*
 import kotlin.math.PI
 import kotlin.math.sin
-import androidx.compose.foundation.Image // Needed for JPGs
-import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.layout.ContentScale
-import io.ktor.client.plugins.HttpTimeout
-
 
 class MainActivity : ComponentActivity() {
 
@@ -180,6 +183,7 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
     val sheetUrl = "https://docs.google.com/spreadsheets/d/1_NlDGWglSz9Z9BuTUktX7mwUfUMnhlhmuA1gnTVcAxA"
 
     val context = LocalContext.current
+    val view = LocalView.current // For haptic feedback
     val coroutineScope = rememberCoroutineScope()
 
     // --- 1. DEFAULT SETTINGS for Intent ---
@@ -293,7 +297,25 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
         label = "pulse_scale"
     )
 
-    Scaffold { paddingValues ->
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Text("Doctas", style = MaterialTheme.typography.titleLarge) },
+                actions = {
+                    IconButton(onClick = { showSheetDialog = true }) {
+                        Image(
+                            painter = painterResource(id = R.drawable.ic_sheets),
+                            contentDescription = "Open Database",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                        )
+                    }
+                }
+            )
+        }
+    ) { paddingValues ->
         Surface(
             modifier = Modifier
                 .fillMaxSize()
@@ -315,19 +337,35 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                         finalText
                     }
 
-                    OutlinedTextField(
-                        value = displayText,
-                        onValueChange = { newText ->
-                            finalText = newText
-                        },
-                        label = { Text("Recognized Text") },
+                    Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .weight(1f), // Takes available space
-                        textStyle = MaterialTheme.typography.headlineSmall,
-                        singleLine = false,
-                        maxLines = Int.MAX_VALUE
-                    )
+                            .weight(1f) // Keep this to fill available space
+                            .heightIn(min = 300.dp), // <--- ADD THIS LINE
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color.Transparent
+                        )
+                    ) {
+
+                    OutlinedTextField(
+                            value = displayText,
+                            onValueChange = { newText ->
+                                finalText = newText
+                            },
+                            label = { Text("Recognized Text") },
+                            modifier = Modifier.fillMaxSize(),
+                            textStyle = MaterialTheme.typography.headlineSmall.copy(
+                                lineHeight = MaterialTheme.typography.headlineSmall.lineHeight * 1.5
+                            ),
+                            singleLine = false,
+                            maxLines = Int.MAX_VALUE,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent
+                            )
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -342,6 +380,34 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                         Text("Insert Test Example")
                     }
                     // --------------------------------
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // Status Indicator
+                    val statusText = when (uiState) {
+                        UiState.IDLE -> "Tap mic to start"
+                        UiState.LISTENING -> "Listening..."
+                        UiState.PROCESSING -> "Processing Data..."
+                        UiState.SUCCESS -> "Data Sent Successfully!"
+                        UiState.ERROR -> "Error Sending Data"
+                    }
+                    
+                    val statusColor = when (uiState) {
+                        UiState.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
+                        UiState.LISTENING -> Green
+                        UiState.PROCESSING -> Yellow
+                        UiState.SUCCESS -> Green
+                        UiState.ERROR -> Red
+                    }
+
+                    SuggestionChip(
+                        onClick = {},
+                        label = { Text(statusText) },
+                        colors = SuggestionChipDefaults.suggestionChipColors(
+                            labelColor = statusColor
+                        ),
+                        border = BorderStroke(1.dp, statusColor)
+                    )
 
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -367,6 +433,7 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
                             .border(4.dp, borderColor, CircleShape)
                             .clickable {
+                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                 if (isListeningDesired) {
                                     stopListening()
                                 } else {
@@ -395,14 +462,15 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
-                        Button(
+                        OutlinedButton(
                             onClick = {
                                 stopListening()
                                 finalText = ""
                                 partialText = ""
                             },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                         ) {
+                            Icon(Icons.Default.Clear, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
                             Text("Clear")
                         }
 
@@ -425,29 +493,12 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                                     color = MaterialTheme.colorScheme.onPrimary
                                 )
                             } else {
-                                Text("Send to database")
+                                Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Send to DB")
                             }
                         }
                     }
-                }
-
-
-                // Top Right Icon (Database)
-                IconButton(
-                    onClick = { showSheetDialog = true },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(16.dp)
-                ) {
-                    // Ensure you have R.drawable.ic_sheets
-                    Image(
-                        painter = painterResource(id = R.drawable.ic_sheets),
-                        contentDescription = "Open Database",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                    )
                 }
 
                 // Popup Dialog
@@ -542,4 +593,3 @@ fun SineWave(rmsdB: Float) {
         }
     }
 }
-
