@@ -15,6 +15,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -22,8 +23,10 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudUpload
@@ -34,6 +37,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -43,13 +47,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.andlab.doctas.ui.theme.DoctasTheme
-import com.andlab.doctas.ui.theme.Green
-import com.andlab.doctas.ui.theme.Red
-import com.andlab.doctas.ui.theme.Yellow
+import com.andlab.doctas.ui.theme.*
 import io.ktor.client.*
 import io.ktor.client.call.*
 import io.ktor.client.engine.cio.*
@@ -78,13 +83,14 @@ class MainActivity : ComponentActivity() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             setContent {
                 DoctasTheme {
-                    Surface(modifier = Modifier.fillMaxSize()) {
+                    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                         Box(contentAlignment = Alignment.Center) {
                             Text(
                                 text = "Speech recognition is not available on this device.",
                                 style = MaterialTheme.typography.bodyLarge,
                                 textAlign = TextAlign.Center,
-                                modifier = Modifier.padding(16.dp)
+                                modifier = Modifier.padding(16.dp),
+                                color = MaterialTheme.colorScheme.onBackground
                             )
                         }
                     }
@@ -132,11 +138,10 @@ private val client = HttpClient(CIO) {
             isLenient = true
         })
     }
-    // Add this block to configure timeouts
     install(HttpTimeout) {
-        requestTimeoutMillis = 30_000L  // 30 seconds for the request to complete
-        connectTimeoutMillis = 30_000L  // 30 seconds to establish a connection
-        socketTimeoutMillis = 30_000L   // 30 seconds of inactivity between data packets
+        requestTimeoutMillis = 30_000L
+        connectTimeoutMillis = 30_000L
+        socketTimeoutMillis = 30_000L
     }
 }
 
@@ -162,47 +167,45 @@ enum class UiState {
     ERROR
 }
 
-// Replace your existing VoiceAssistanceScreen composable with this improved version
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
-    // --- State Variables ---
     var finalText by rememberSaveable { mutableStateOf("") }
     var partialText by remember { mutableStateOf("") }
-
-    // The "Master Switch": If this is true, we force the recognizer to restart
     var isListeningDesired by remember { mutableStateOf(false) }
     var uiState by rememberSaveable { mutableStateOf(UiState.IDLE) }
-
     var rmsdB by remember { mutableFloatStateOf(0f) }
+    var lastExtractedData by remember { mutableStateOf<FormattedData?>(null) }
 
-    // --- State for Dialog and URL ---
     var showSheetDialog by remember { mutableStateOf(false) }
     val uriHandler = LocalUriHandler.current
     val sheetUrl = "https://docs.google.com/spreadsheets/d/1_NlDGWglSz9Z9BuTUktX7mwUfUMnhlhmuA1gnTVcAxA"
 
     val context = LocalContext.current
-    val view = LocalView.current // For haptic feedback
+    val view = LocalView.current
     val coroutineScope = rememberCoroutineScope()
 
-    // --- 1. DEFAULT SETTINGS for Intent ---
+    // Local Font setup
+    val greatVibesFamily = remember {
+        FontFamily(
+            Font(resId = R.font.great_vibes_regular, weight = FontWeight.Normal)
+        )
+    }
+
     val speechRecognizerIntent = remember {
         Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            // Use FREE_FORM for better dictation (vs WEB_SEARCH for commands)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toString())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            // We use the "DICTATION_MODE" flag as a hint to the OS to listen longer if possible
             putExtra("android.speech.extra.DICTATION_MODE", true)
         }
     }
 
-    // --- Logic Helpers ---
     val startListening = {
         isListeningDesired = true
         uiState = UiState.LISTENING
+        view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
         speechRecognizer.startListening(speechRecognizerIntent)
     }
 
@@ -212,7 +215,6 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
         speechRecognizer.stopListening()
     }
 
-    // --- 2. CONTINUOUS SPEECH LOGIC ---
     val listener = remember {
         object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
@@ -223,32 +225,23 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                 if (isListeningDesired) rmsdB = rmsdBVal
             }
             override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {
-                // The engine paused (silence). Do NOT stop the UI here.
-            }
+            override fun onEndOfSpeech() {}
 
             override fun onError(error: Int) {
-                if (!isListeningDesired) return // We stopped it manually
-
-                // These errors mean "Silence" or "Timeout" -> Restart immediately
+                if (!isListeningDesired) return
                 if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
                     speechRecognizer.startListening(speechRecognizerIntent)
                 } else {
-                    // For other errors, try to restart once, but update UI if it fails
-                    // (Optional: You could count retries here to avoid infinite loops)
                     speechRecognizer.startListening(speechRecognizerIntent)
                 }
             }
 
             override fun onResults(results: Bundle?) {
                 val result = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.getOrNull(0) ?: ""
-
                 if (result.isNotBlank()) {
                     finalText = if (finalText.isBlank()) result else "$finalText $result"
                 }
                 partialText = ""
-
-                // RESTART LOGIC: If we still want to listen, start again instantly
                 if (isListeningDesired) {
                     speechRecognizer.startListening(speechRecognizerIntent)
                 } else {
@@ -277,19 +270,21 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
         onDispose { speechRecognizer.setRecognitionListener(null) }
     }
 
-    // --- Animation & Color Logic ---
-    val borderColor = when (uiState) {
-        UiState.LISTENING -> Green
-        UiState.PROCESSING -> Yellow
-        UiState.ERROR -> Red
-        UiState.SUCCESS -> Green
-        else -> MaterialTheme.colorScheme.onSurface
-    }
+    val borderColor by animateColorAsState(
+        targetValue = when (uiState) {
+            UiState.LISTENING -> Green
+            UiState.PROCESSING -> Yellow
+            UiState.ERROR -> Red
+            UiState.SUCCESS -> Green
+            else -> MaterialTheme.colorScheme.outline
+        },
+        label = "border_color"
+    )
 
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 1f,
-        targetValue = if (uiState == UiState.LISTENING) 1.2f else 1f,
+        targetValue = if (uiState == UiState.LISTENING) 1.15f else 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(1000),
             repeatMode = RepeatMode.Reverse
@@ -298,19 +293,48 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
     )
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             CenterAlignedTopAppBar(
-                title = { Text("Doctas", style = MaterialTheme.typography.titleLarge) },
+                title = { 
+                    Text(
+                        text = "Doctas", 
+                        style = MaterialTheme.typography.headlineMedium.copy(
+                            fontFamily = greatVibesFamily,
+                            fontSize = 36.sp
+                        ), 
+                        color = MaterialTheme.colorScheme.primary 
+                    ) 
+                },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background
+                ),
                 actions = {
-                    IconButton(onClick = { showSheetDialog = true }) {
-                        Image(
-                            painter = painterResource(id = R.drawable.ic_sheets),
-                            contentDescription = "Open Database",
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clip(CircleShape)
-                        )
+                    Surface(
+                        onClick = { showSheetDialog = true },
+                        color = Color.Transparent,
+                        modifier = Modifier.padding(end = 8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "Open G-Sheet",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Image(
+                                painter = painterResource(id = R.drawable.ic_sheets),
+                                contentDescription = "Open Database",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(CircleShape)
+                            )
+                        }
                     }
                 }
             )
@@ -319,10 +343,10 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
         Surface(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues)
+                .padding(paddingValues),
+            color = MaterialTheme.colorScheme.background
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -330,7 +354,6 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.SpaceBetween
                 ) {
-                    //1. Text Editing Area (Scrollable & Live Preview)
                     val displayText = if (partialText.isNotBlank()) {
                         "$finalText $partialText"
                     } else {
@@ -340,56 +363,47 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .weight(1f) // Keep this to fill available space
-                            .heightIn(min = 300.dp), // <--- ADD THIS LINE
+                            .weight(1f)
+                            .heightIn(min = 300.dp),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                         colors = CardDefaults.cardColors(
-                            containerColor = Color.Transparent
-                        )
+                            containerColor = MaterialTheme.colorScheme.surface
+                        ),
+                        shape = RoundedCornerShape(16.dp)
                     ) {
-
-                    OutlinedTextField(
+                        OutlinedTextField(
                             value = displayText,
-                            onValueChange = { newText ->
-                                finalText = newText
-                            },
-                            label = { Text("Recognized Text") },
+                            onValueChange = { newText -> finalText = newText },
+                            placeholder = { Text("Press the mic to Start capturing patient details...", color = MaterialTheme.colorScheme.outlineVariant) },
                             modifier = Modifier.fillMaxSize(),
-                            textStyle = MaterialTheme.typography.headlineSmall.copy(
-                                lineHeight = MaterialTheme.typography.headlineSmall.lineHeight * 1.5
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                fontSize = 18.sp,
+                                lineHeight = 28.sp,
+                                color = MaterialTheme.colorScheme.onSurface
                             ),
                             singleLine = false,
                             maxLines = Int.MAX_VALUE,
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent
+                                focusedContainerColor = MaterialTheme.colorScheme.surface,
+                                unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                                focusedBorderColor = PrimaryMainLight,
+                                unfocusedBorderColor = PrimaryPressedLight,
+                                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                unfocusedTextColor = MaterialTheme.colorScheme.onSurface
                             )
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // --- NEW: Test Example Button ---
-                    // Placed between Text Area and Mic/Wave
-                    TextButton(
-                        onClick = {
-                            finalText = "Ramesh Kumar, age 50, male, CR-98765, shortness of breath, Glasgow Coma Scale 13, red initial triage, yellow final triage, BP 160/95, pulse rate 95, respiratory rate 22, SpO2 89%, chest X-ray and CT scan advised, radiology completed, report reported, admitted to respiratory medicine"
-                            partialText = "" // Clear any partial text
-                        }
-                    ) {
-                        Text("Insert Test Example")
-                    }
-                    // --------------------------------
+                    Spacer(modifier = Modifier.height(12.dp))
 
                     Spacer(modifier = Modifier.height(8.dp))
                     
-                    // Status Indicator
                     val statusText = when (uiState) {
-                        UiState.IDLE -> "Tap mic to start"
+                        UiState.IDLE -> "Ready to record"
                         UiState.LISTENING -> "Listening..."
-                        UiState.PROCESSING -> "Processing Data..."
-                        UiState.SUCCESS -> "Data Sent Successfully!"
-                        UiState.ERROR -> "Error Sending Data"
+                        UiState.PROCESSING -> "Analyzing medical data..."
+                        UiState.SUCCESS -> "Data captured successfully!"
+                        UiState.ERROR -> "Failed to process data"
                     }
                     
                     val statusColor = when (uiState) {
@@ -402,38 +416,41 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
 
                     SuggestionChip(
                         onClick = {},
-                        label = { Text(statusText) },
+                        label = { Text(statusText, style = MaterialTheme.typography.labelLarge) },
                         colors = SuggestionChipDefaults.suggestionChipColors(
-                            labelColor = statusColor
+                            labelColor = statusColor,
+                            containerColor = statusColor.copy(alpha = 0.1f)
                         ),
-                        border = BorderStroke(1.dp, statusColor)
+                        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.5f)),
+                        shape = RoundedCornerShape(8.dp)
                     )
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
 
-                    // 2. Sine Wave Visualization
-                    // Only show when "Desired" so it doesn't flicker during restart
                     if (isListeningDesired) {
                         SineWave(rmsdB = rmsdB)
                     } else {
-                        Spacer(modifier = Modifier.height(100.dp))
+                        Spacer(modifier = Modifier.height(80.dp))
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
 
                     // 3. Microphone Button
+                    val isDark = isSystemInDarkTheme()
+                    val micShadow = if (isDark) MicShadowDark else MicShadowLight
+                    
                     Box(
                         modifier = Modifier
-                            .size(150.dp)
+                            .size(120.dp)
                             .graphicsLayer {
                                 scaleX = pulseScale
                                 scaleY = pulseScale
                             }
+                            .shadow(elevation = 8.dp, shape = CircleShape, ambientColor = micShadow, spotColor = micShadow)
                             .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                            .background(MicBackground)
                             .border(4.dp, borderColor, CircleShape)
                             .clickable {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                 if (isListeningDesired) {
                                     stopListening()
                                 } else {
@@ -448,26 +465,30 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                         Icon(
                             imageVector = Icons.Default.Mic,
                             contentDescription = "Mic",
-                            tint = borderColor,
+                            tint = MicIcon,
                             modifier = Modifier
                                 .align(Alignment.Center)
-                                .size(64.dp)
+                                .size(48.dp)
                         )
                     }
 
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    // 4. Action Buttons (Clear & Send)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
                         OutlinedButton(
                             onClick = {
                                 stopListening()
                                 finalText = ""
                                 partialText = ""
+                                lastExtractedData = null
                             },
+                            modifier = Modifier.weight(1f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+                            shape = RoundedCornerShape(12.dp)
                         ) {
                             Icon(Icons.Default.Clear, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
@@ -481,81 +502,128 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                                     uiState = UiState.PROCESSING
                                     coroutineScope.launch {
                                         val result = sendHealthData(finalText)
-                                        uiState = if (result.isSuccess) UiState.SUCCESS else UiState.ERROR
+                                        if (result.isSuccess) {
+                                            uiState = UiState.SUCCESS
+                                            lastExtractedData = result.getOrNull()
+                                            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                                        } else {
+                                            uiState = UiState.ERROR
+                                            view.performHapticFeedback(HapticFeedbackConstants.REJECT)
+                                        }
                                     }
                                 }
                             },
-                            enabled = finalText.isNotBlank() && uiState != UiState.PROCESSING
+                            enabled = finalText.isNotBlank() && uiState != UiState.PROCESSING,
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary,
+                                disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                disabledContentColor = MaterialTheme.colorScheme.outlineVariant
+                            ),
+                            shape = RoundedCornerShape(12.dp)
                         ) {
                             if (uiState == UiState.PROCESSING) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(24.dp),
-                                    color = MaterialTheme.colorScheme.onPrimary
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    strokeWidth = 2.dp
                                 )
                             } else {
                                 Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text("Send to DB")
+                                Text("Send")
                             }
                         }
                     }
                 }
 
-                // Popup Dialog
                 if (showSheetDialog) {
                     AlertDialog(
                         onDismissRequest = { showSheetDialog = false },
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        titleContentColor = MaterialTheme.colorScheme.onSurface,
+                        textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                         icon = {
                             Image(
                                 painter = painterResource(id = R.drawable.ic_sheets),
                                 contentDescription = null,
-                                modifier = Modifier.size(24.dp)
+                                modifier = Modifier.size(50.dp)
                             )
                         },
                         title = { Text("Google Sheet") },
-                        text = { Text("Do you want to visit the database?") },
+                        text = { Text("Do you want to visit the patient database?") },
                         confirmButton = {
                             TextButton(
                                 onClick = {
                                     showSheetDialog = false
                                     uriHandler.openUri(sheetUrl)
-                                }
+                                },
+                                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary)
                             ) {
-                                Text("Visit")
+                                Text("Open")
                             }
                         },
                         dismissButton = {
-                            TextButton(onClick = { showSheetDialog = false }) {
+                            TextButton(
+                                onClick = { showSheetDialog = false },
+                                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
+                            ) {
                                 Text("Cancel")
                             }
                         }
                     )
+                }
+                
+                // Success Overlay for Extracted Data
+                AnimatedVisibility(
+                    visible = uiState == UiState.SUCCESS && lastExtractedData != null,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 100.dp, start = 16.dp, end = 16.dp)
+                ) {
+                    lastExtractedData?.let { data ->
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text("Extracted Data", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "Patient: ${data.name ?: "Unknown"}, HR: ${data.heartRate ?: "--"} bpm, SpO2: ${data.spo2 ?: "--"}%",
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                                TextButton(
+                                    onClick = { lastExtractedData = null; uiState = UiState.IDLE },
+                                    modifier = Modifier.align(Alignment.End)
+                                ) {
+                                    Text("Dismiss")
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-// Fixed SineWave Function
 @Composable
 fun SineWave(rmsdB: Float) {
-    // Smoothly animate the amplitude jumping
     val animatedRms by animateFloatAsState(
         targetValue = rmsdB,
         label = "rms",
         animationSpec = tween(100)
     )
 
-    // We use infiniteTransition for the phase to ensure it loops perfectly forever
     val infiniteTransition = rememberInfiniteTransition(label = "wave_phase")
 
-    // Create 5 different phase animations with slightly different speeds
-    val phases = List(5) { index ->
+    val phases = List(3) { index ->
         infiniteTransition.animateFloat(
             initialValue = 0f,
             targetValue = 2 * PI.toFloat(),
             animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 1000 + (index * 500), easing = LinearEasing),
+                animation = tween(durationMillis = 800 + (index * 300), easing = LinearEasing),
                 repeatMode = RepeatMode.Restart
             ),
             label = "phase_$index"
@@ -564,7 +632,7 @@ fun SineWave(rmsdB: Float) {
 
     Canvas(modifier = Modifier
         .fillMaxWidth()
-        .height(100.dp)) {
+        .height(80.dp)) {
         val width = size.width
         val height = size.height
         val centerY = height / 2
@@ -573,22 +641,19 @@ fun SineWave(rmsdB: Float) {
             val path = Path()
             path.moveTo(0f, centerY)
 
-            // Map rmsdB (-2 to 10 usually) to an amplitude
             val normalizedRms = ((animatedRms + 2) / 12).coerceIn(0f, 1f)
-            val amplitude = normalizedRms * 50.dp.toPx() * (1f - index * 0.15f)
+            val amplitude = normalizedRms * 40.dp.toPx() * (1f - index * 0.2f)
 
-            // Draw the wave
-            for (x in 0..width.toInt() step 10) {
-                // Use phaseState.value to get the current animated value
-                val angle = (x / width) * 2 * PI + phaseState.value + index
+            for (x in 0..width.toInt() step 5) {
+                val angle = (x / width) * 2 * PI * 1.5 + phaseState.value + index
                 val y = centerY + sin(angle).toFloat() * amplitude
                 path.lineTo(x.toFloat(), y)
             }
 
             drawPath(
                 path = path,
-                color = Green.copy(alpha = 0.5f - index * 0.1f),
-                style = Stroke(width = 3.dp.toPx())
+                color = PrimaryMainLight.copy(alpha = 0.6f - index * 0.2f),
+                style = Stroke(width = (3 - index).dp.toPx())
             )
         }
     }

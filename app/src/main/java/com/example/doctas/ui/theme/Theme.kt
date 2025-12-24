@@ -12,21 +12,47 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
 private val DarkColorPalette = darkColorScheme(
-    primary = White,
-    background = DarkGray,
-    surface = DarkGray,
-    onPrimary = DarkGray,
-    onBackground = White,
-    onSurface = White
+    primary = PrimaryMainDark,
+    onPrimary = TextOnPrimaryDark,
+    primaryContainer = PrimarySoftGlowDark,
+    onPrimaryContainer = PrimaryMainDark,
+    inversePrimary = PrimaryMainLight,
+    secondary = SecondaryIconDark,
+    onSecondary = SecondaryTextDark,
+    secondaryContainer = SecondarySurfaceDark,
+    onSecondaryContainer = PrimaryTextDark,
+    background = AppBackgroundDark,
+    onBackground = PrimaryTextDark,
+    surface = PrimaryCardDark,
+    onSurface = PrimaryTextDark,
+    surfaceVariant = SecondarySurfaceDark,
+    onSurfaceVariant = SecondaryTextDark,
+    outline = DividerBorderDark,
+    outlineVariant = HintPlaceholderDark,
+    error = Red,
+    onError = TextOnPrimaryLight
 )
 
 private val LightColorPalette = lightColorScheme(
-    primary = DarkGray,
-    background = LightGray,
-    surface = White,
-    onPrimary = White,
-    onBackground = Black,
-    onSurface = Black
+    primary = PrimaryMainLight,
+    onPrimary = TextOnPrimaryLight,
+    primaryContainer = PrimarySoftLight,
+    onPrimaryContainer = PrimaryMainLight,
+    inversePrimary = PrimaryMainDark,
+    secondary = SecondaryIconLight,
+    onSecondary = SecondaryTextLight,
+    secondaryContainer = SecondarySurfaceLight,
+    onSecondaryContainer = PrimaryTextLight,
+    background = AppBackgroundLight,
+    onBackground = PrimaryTextLight,
+    surface = PrimaryCardLight,
+    onSurface = PrimaryTextLight,
+    surfaceVariant = SecondarySurfaceLight,
+    onSurfaceVariant = SecondaryTextLight,
+    outline = DividerBorderLight,
+    outlineVariant = HintPlaceholderLight,
+    error = Red,
+    onError = TextOnPrimaryLight
 )
 
 @Composable
