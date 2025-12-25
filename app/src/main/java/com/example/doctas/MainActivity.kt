@@ -14,7 +14,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
@@ -107,15 +106,6 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        try {
-            speechRecognizer?.destroy()
-        } catch (e: Exception) {
-            // Handle potential crash on destroy
-        }
-    }
 }
 
 @Serializable
@@ -201,18 +191,16 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toString())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
 
-            // GBOARD-LIKE FORMATTING: Enable automatic punctuation and capitalization
+            // Let Google handle the periods/capitals naturally
             putExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING, true)
 
-            // CONTINUOUS MODE: Helps with longer dictation sessions
-            putExtra("android.speech.extra.DICTATION_MODE", true)
-            putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, true)
-
-            // SILENCE THRESHOLDS: Fine-tune for 2025 device standards
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 100000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 100000L)
+            // REDUCE these values. 100,000ms is too long; it prevents onResults from firing
+            // until the session is forced closed. 2000ms is better for dictation.
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
         }
     }
+
 
 
     val startListening = {
@@ -246,43 +234,12 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
             override fun onError(error: Int) {
                 if (!isListeningDesired) return
 
-                consecutiveErrors++
-
-                if (consecutiveErrors >= 3) {
-                    uiState = UiState.ERROR
-                    isListeningDesired = false
-                    consecutiveErrors = 0
-                    return
-                }
-
-                when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH,
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                        // Wait before restarting
-                        coroutineScope.launch {
-                            kotlinx.coroutines.delay(800)
-                            if (isListeningDesired) {
-                                speechRecognizer.startListening(speechRecognizerIntent)
-                            }
-                        }
-                    }
-                    SpeechRecognizer.ERROR_NETWORK,
-                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
-                    SpeechRecognizer.ERROR_SERVER -> {
-                        uiState = UiState.ERROR
-                        isListeningDesired = false
-                        consecutiveErrors = 0
-                    }
-                    else -> {
-                        coroutineScope.launch {
-                            kotlinx.coroutines.delay(500)
-                            if (isListeningDesired) {
-                                speechRecognizer.startListening(speechRecognizerIntent)
-                            }
-                        }
-                    }
+                // If timeout or no speech, restart INSTANTLY
+                if (error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT || error == SpeechRecognizer.ERROR_NO_MATCH) {
+                    speechRecognizer.startListening(speechRecognizerIntent)
                 }
             }
+
 
             override fun onResults(results: Bundle?) {
                 val result = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.getOrNull(0) ?: ""
@@ -316,13 +273,7 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                 lastRecognitionTime = System.currentTimeMillis()
 
                 if (isListeningDesired) {
-                    // Delay before restart to avoid cutting off speech
-                    coroutineScope.launch {
-                        kotlinx.coroutines.delay(400)
-                        if (isListeningDesired) {
-                            speechRecognizer.startListening(speechRecognizerIntent)
-                        }
-                    }
+                    speechRecognizer.startListening(speechRecognizerIntent)
                 } else {
                     uiState = UiState.IDLE
                 }
