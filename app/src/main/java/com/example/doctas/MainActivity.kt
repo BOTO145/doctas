@@ -653,35 +653,6 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                         }
                     )
                 }
-                
-                // Success Overlay for Extracted Data
-                AnimatedVisibility(
-                    visible = uiState == UiState.SUCCESS && lastExtractedData != null,
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 100.dp, start = 16.dp, end = 16.dp)
-                ) {
-                    lastExtractedData?.let { data ->
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                            shape = RoundedCornerShape(16.dp)
-                        ) {
-                            Column(modifier = Modifier.padding(16.dp)) {
-                                Text("Extracted Data", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    "Patient: ${data.name ?: "Unknown"}, HR: ${data.heartRate ?: "--"} bpm, SpO2: ${data.spo2 ?: "--"}%",
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                                TextButton(
-                                    onClick = { lastExtractedData = null; uiState = UiState.IDLE },
-                                    modifier = Modifier.align(Alignment.End)
-                                ) {
-                                    Text("Dismiss")
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
     }
