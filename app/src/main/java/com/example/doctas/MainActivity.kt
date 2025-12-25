@@ -170,6 +170,9 @@ enum class UiState {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
+    // ADD these with other state variables:
+    var consecutiveErrors by remember { mutableIntStateOf(0) }
+    var lastRecognitionTime by remember { mutableLongStateOf(0L) }
     var finalText by rememberSaveable { mutableStateOf("") }
     var partialText by remember { mutableStateOf("") }
     var isListeningDesired by remember { mutableStateOf(false) }
@@ -197,10 +200,20 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toString())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+
+            // GBOARD-LIKE FORMATTING: Enable automatic punctuation and capitalization
+            putExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING, true)
+
+            // CONTINUOUS MODE: Helps with longer dictation sessions
             putExtra("android.speech.extra.DICTATION_MODE", true)
+            putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, true)
+
+            // SILENCE THRESHOLDS: Fine-tune for 2025 device standards
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 100000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 100000L)
         }
     }
+
 
     val startListening = {
         isListeningDesired = true
@@ -222,28 +235,94 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
             }
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdBVal: Float) {
-                if (isListeningDesired) rmsdB = rmsdBVal
+                if (isListeningDesired) {
+                    // Filter out very quiet noise
+                    rmsdB = if (rmsdBVal > -2.0f) rmsdBVal else 0f
+                }
             }
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
 
             override fun onError(error: Int) {
                 if (!isListeningDesired) return
-                if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                    speechRecognizer.startListening(speechRecognizerIntent)
-                } else {
-                    speechRecognizer.startListening(speechRecognizerIntent)
+
+                consecutiveErrors++
+
+                if (consecutiveErrors >= 3) {
+                    uiState = UiState.ERROR
+                    isListeningDesired = false
+                    consecutiveErrors = 0
+                    return
+                }
+
+                when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH,
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                        // Wait before restarting
+                        coroutineScope.launch {
+                            kotlinx.coroutines.delay(800)
+                            if (isListeningDesired) {
+                                speechRecognizer.startListening(speechRecognizerIntent)
+                            }
+                        }
+                    }
+                    SpeechRecognizer.ERROR_NETWORK,
+                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
+                    SpeechRecognizer.ERROR_SERVER -> {
+                        uiState = UiState.ERROR
+                        isListeningDesired = false
+                        consecutiveErrors = 0
+                    }
+                    else -> {
+                        coroutineScope.launch {
+                            kotlinx.coroutines.delay(500)
+                            if (isListeningDesired) {
+                                speechRecognizer.startListening(speechRecognizerIntent)
+                            }
+                        }
+                    }
                 }
             }
 
             override fun onResults(results: Bundle?) {
                 val result = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.getOrNull(0) ?: ""
                 if (result.isNotBlank()) {
-                    finalText = if (finalText.isBlank()) result else "$finalText $result"
+                    // Reset error count on success
+                    consecutiveErrors = 0
+
+                    // Smart punctuation
+                    val needsPunctuation = finalText.isNotBlank() &&
+                            !finalText.endsWith(".") &&
+                            !finalText.endsWith("?") &&
+                            !finalText.endsWith("!")
+
+                    val capitalizedResult = if (finalText.isBlank() || finalText.endsWith(".")) {
+                        result.replaceFirstChar { it.uppercase() }
+                    } else {
+                        result
+                    }
+
+                    finalText = when {
+                        finalText.isBlank() -> capitalizedResult
+                        needsPunctuation -> "$finalText. $capitalizedResult"
+                        else -> "$finalText $capitalizedResult"
+                    }
+
+                    // Haptic feedback on successful capture
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 }
+
                 partialText = ""
+                lastRecognitionTime = System.currentTimeMillis()
+
                 if (isListeningDesired) {
-                    speechRecognizer.startListening(speechRecognizerIntent)
+                    // Delay before restart to avoid cutting off speech
+                    coroutineScope.launch {
+                        kotlinx.coroutines.delay(400)
+                        if (isListeningDesired) {
+                            speechRecognizer.startListening(speechRecognizerIntent)
+                        }
+                    }
                 } else {
                     uiState = UiState.IDLE
                 }
@@ -251,7 +330,8 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
 
             override fun onPartialResults(partialResults: Bundle?) {
                 val result = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.getOrNull(0) ?: ""
-                if (result.isNotBlank()) {
+                // Only update if significantly different and not too short
+                if (result.isNotBlank() && result.length > 2 && result != partialText) {
                     partialText = result
                 }
             }
@@ -365,11 +445,10 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                             .fillMaxWidth()
                             .weight(1f)
                             .heightIn(min = 300.dp),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surface
                         ),
-                        shape = RoundedCornerShape(16.dp)
+
                     ) {
                         OutlinedTextField(
                             value = displayText,
