@@ -137,7 +137,7 @@ private val client = HttpClient(CIO) {
 
 suspend fun sendHealthData(text: String): Result<FormattedData> {
     return try {
-        val httpResponse: HttpResponse = client.post("https://f311e11ce25b.ngrok-free.app/api/health-data") {
+        val httpResponse: HttpResponse = client.post("https://andlab.ratfish-miaplacidus.ts.net/api/health-data") {
             contentType(ContentType.Application.Json)
             setBody(HealthDataRequest(text = text))
         }
