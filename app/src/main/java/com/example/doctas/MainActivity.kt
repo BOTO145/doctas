@@ -78,7 +78,11 @@ import io.ktor.client.request.forms.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -146,36 +150,77 @@ private val client = HttpClient(CIO) {
         })
     }
     install(HttpTimeout) {
-        requestTimeoutMillis = 50_000L
-        connectTimeoutMillis = 50_000L
-        socketTimeoutMillis = 50_000L
+        requestTimeoutMillis = 30_000L
+        connectTimeoutMillis = 30_000L
+        socketTimeoutMillis = 30_000L
     }
 }
 
 const val BASE_URL = "https://andlab.ratfish-miaplacidus.ts.net"
 
+// Helper to resize bitmap to speed up processing and upload
+fun Bitmap.resizeToLimit(maxDimension: Int): Bitmap {
+    val width = width
+    val height = height
+    val ratio = width.toFloat() / height.toFloat()
+    
+    var newWidth = width
+    var newHeight = height
+    
+    if (width > height) {
+        if (width > maxDimension) {
+            newWidth = maxDimension
+            newHeight = (newWidth / ratio).toInt()
+        }
+    } else {
+        if (height > maxDimension) {
+            newHeight = maxDimension
+            newWidth = (newHeight * ratio).toInt()
+        }
+    }
+    
+    return if (newWidth == width && newHeight == height) this 
+    else Bitmap.createScaledBitmap(this, newWidth, newHeight, true)
+}
+
 suspend fun submitPatientData(
     text: String,
     abgBitmap: Bitmap?,
     ecgBitmap: Bitmap?
-): Result<String> {
-    return try {
+): Result<String> = withContext(Dispatchers.Default) {
+    try {
+        // Parallel processing of images (Resizing and Compressing)
+        val abgDataDeferred = async {
+            abgBitmap?.let {
+                val resized = it.resizeToLimit(1280) // Limit to 720p/1080p-ish range
+                val stream = ByteArrayOutputStream()
+                resized.compress(Bitmap.CompressFormat.JPEG, 50, stream) // 50% is plenty for text/ECG lines
+                stream.toByteArray()
+            }
+        }
+
+        val ecgDataDeferred = async {
+            ecgBitmap?.let {
+                val resized = it.resizeToLimit(1280)
+                val stream = ByteArrayOutputStream()
+                resized.compress(Bitmap.CompressFormat.JPEG, 50, stream)
+                stream.toByteArray()
+            }
+        }
+
+        val abgBytes = abgDataDeferred.await()
+        val ecgBytes = ecgDataDeferred.await()
+
         val formData = formData {
             append("text", text)
-
-            abgBitmap?.let {
-                val stream = ByteArrayOutputStream()
-                it.compress(Bitmap.CompressFormat.JPEG, 60, stream)
-                append("abg", stream.toByteArray(), Headers.build {
+            abgBytes?.let {
+                append("abg", it, Headers.build {
                     append(HttpHeaders.ContentType, "image/jpeg")
                     append(HttpHeaders.ContentDisposition, "filename=\"abg.jpg\"")
                 })
             }
-
-            ecgBitmap?.let {
-                val stream = ByteArrayOutputStream()
-                it.compress(Bitmap.CompressFormat.JPEG, 60, stream)
-                append("ecg", stream.toByteArray(), Headers.build {
+            ecgBytes?.let {
+                append("ecg", it, Headers.build {
                     append(HttpHeaders.ContentType, "image/jpeg")
                     append(HttpHeaders.ContentDisposition, "filename=\"ecg.jpg\"")
                 })
@@ -396,7 +441,7 @@ fun VoiceAssistanceScreen(speechRecognizer: SpeechRecognizer) {
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
                             Text("Open G-Sheet", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                             Spacer(modifier = Modifier.width(4.dp))
-                            Image(painter = painterResource(id = R.drawable.ic_sheets), contentDescription = "Open Database", contentScale = ContentScale.Fit, modifier = Modifier.size(24.dp).clip(CircleShape))
+                            Image(painter = painterResource(id = R.drawable.ic_sheets), contentDescription = "Open Database", contentScale = ContentScale.Fit, modifier = Modifier.size(50.dp).clip(CircleShape))
                         }
                     }
                 }
